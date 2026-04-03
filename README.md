@@ -1,0 +1,2 @@
+# FastSync
+SQLServer到OceanBase MySQL的表结构及数据快速同步工具

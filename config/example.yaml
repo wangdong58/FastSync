@@ -1,0 +1,106 @@
+# SQL Server to OceanBase MySQL Sync Tool 配置文件示例
+
+version: "1.0"
+
+# 同步任务名称
+job_name: "sqlserver_to_oceanbase_sync"
+
+# 源端配置 (SQL Server 2016)
+source:
+  type: "sqlserver"
+  host: "192.168.1.100"
+  port: 1433
+  database: "SourceDB"
+  username: "sync_user"
+  password: "${SOURCE_DB_PASSWORD}"  # 支持环境变量
+  # 连接池配置
+  max_open_conns: 20
+  max_idle_conns: 5
+  conn_max_lifetime: "1h"
+
+# 目标端配置 (OceanBase MySQL 模式)
+target:
+  type: "mysql"
+  host: "192.168.1.200"
+  port: 2881
+  database: "TargetDB"
+  username: "root"
+  password: "${TARGET_DB_PASSWORD}"  # 支持环境变量
+  # 连接参数
+  params:
+    charset: "utf8mb4"
+    parseTime: "true"
+    loc: "Local"
+  # 连接池配置
+  max_open_conns: 50
+  max_idle_conns: 10
+  conn_max_lifetime: "1h"
+
+# 同步配置
+sync:
+  # 并发Worker数量（单表内的分段并发，推荐：CPU核心数 * 4 到 100之间）
+  workers: 100
+  # 并发同步表数量（多表并发，推荐：2-10，根据系统资源调整）
+  table_workers: 4
+  # 批量插入大小（推荐：1000-5000）
+  batch_size: 2000
+  # 每批次读取行数
+  read_buffer: 5000
+  # 通道缓冲区大小
+  channel_buffer: 10000
+  # 重试次数
+  max_retries: 3
+  # 重试间隔
+  retry_interval: "5s"
+
+# 表映射配置
+# 如果为空，将自动同步源端所有用户表
+# 如果指定，只同步配置的表
+tables:
+  # 示例1：简单表映射
+  - source: "dbo.Users"
+    target: "users"
+    truncate_before_sync: true
+
+  # 示例2：带列映射和WHERE条件的表
+  - source: "dbo.Orders"
+    target: "orders"
+    columns:
+      - source: "OrderID"
+        target: "order_id"
+      - source: "UserID"
+        target: "user_id"
+      - source: "CreateTime"
+        target: "create_time"
+    # 分段字段（用于并行读取，默认为主键）
+    split_column: "OrderID"
+    # WHERE条件（可选）
+    where: "Status = 1"
+    # 同步前清空目标表
+    truncate_before_sync: true
+
+  # 示例3：大表配置（推荐显式指定分段字段）
+  - source: "dbo.TransactionLog"
+    target: "transaction_log"
+    split_column: "LogID"
+    truncate_before_sync: true
+
+# 监控配置
+monitor:
+  # 进度报告间隔
+  report_interval: "10s"
+  # 是否启用HTTP监控端点（可选功能）
+  enable_http: false
+  http_port: 8080
+  # 日志级别: debug, info, warn, error
+  log_level: "info"
+
+# 对比配置
+compare:
+  # 同步完成后是否自动对比
+  auto_compare: true
+  # 对比抽样比例（0-1，1为全量对比）
+  # 对于十亿级数据，建议使用0.001或更低
+  sample_rate: 0.01
+  # 对比线程数
+  compare_workers: 10

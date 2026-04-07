@@ -409,7 +409,7 @@ FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
 For questions or suggestions:
 
 - GitHub Issues: [https://github.com/yourusername/FastSync/issues](https://github.com/yourusername/FastSync/issues)
-- Email: your.email@example.com
+- Email: 8442161@qq.com
 
 ---
 

@@ -432,7 +432,14 @@ func (ets *ExtendedTableSchema) GenerateFullCreateTableSQL() string {
 		// 检查是否有CURRENT_TIMESTAMP默认值
 		mysqlDefault := ""
 		if !col.IsIdentity && col.DefaultValue != "" {
-			mysqlDefault = convertDefaultValue(col.DefaultValue)
+			// 检查是否为自定义函数（MySQL不支持）
+			if isCustomFunction(col.DefaultValue) {
+				// 记录警告日志
+				fmt.Printf("[WARN] Table %s, Column %s: SQL Server custom function '%s' is not supported in MySQL, skipping DEFAULT constraint\n",
+					ets.TableName, col.Name, col.DefaultValue)
+			} else {
+				mysqlDefault = convertDefaultValue(col.DefaultValue)
+			}
 		}
 
 		// 如果默认值为CURRENT_TIMESTAMP，使用TIMESTAMP类型
@@ -574,6 +581,58 @@ func convertDefaultValue(sqlServerDefault string) string {
 
 	// 其他情况，添加单引号作为字符串
 	return "'" + defaultValue + "'"
+}
+
+// isCustomFunction 检查是否为SQL Server自定义函数
+// MySQL不支持自定义函数作为默认值，如 [dbo].[uf_getsysid]()
+func isCustomFunction(defaultValue string) bool {
+	defaultValue = strings.TrimSpace(defaultValue)
+
+	// 移除外层括号
+	for strings.HasPrefix(defaultValue, "(") && strings.HasSuffix(defaultValue, ")") {
+		defaultValue = strings.TrimPrefix(defaultValue, "(")
+		defaultValue = strings.TrimSuffix(defaultValue, ")")
+		defaultValue = strings.TrimSpace(defaultValue)
+	}
+
+	// 检查是否包含函数调用特征：
+	// 1. 包含 () 表示函数调用
+	// 2. 包含 dbo. 或 [dbo]. 表示自定义函数
+	// 3. 不是SQL Server内置函数（getdate, newid等）
+	if strings.Contains(defaultValue, "(") && strings.Contains(defaultValue, ")") {
+		// 提取函数名部分（去掉括号）
+		funcName := strings.TrimSpace(strings.Split(defaultValue, "(")[0])
+
+		// SQL Server 内置函数（支持的白名单）
+		builtInFuncs := map[string]bool{
+			"getdate":     true,
+			"getdate()":   true,
+			"newid":       true,
+			"newid()":     true,
+			"newsequentialid": true,
+			"newsequentialid()": true,
+			"sysdatetime": true,
+			"sysdatetime()": true,
+			"sysutcdatetime": true,
+			"sysutcdatetime()": true,
+		}
+
+		// 检查是否为内置函数（不区分大小写）
+		if builtInFuncs[strings.ToLower(funcName)] {
+			return false // 是内置函数，不是自定义函数
+		}
+
+		// 包含 dbo. 或 [dbo]. 的肯定是自定义函数
+		if strings.Contains(strings.ToLower(defaultValue), "dbo.") ||
+			strings.Contains(defaultValue, "[dbo]") {
+			return true
+		}
+
+		// 其他包含括号的，视为自定义函数（安全起见）
+		return true
+	}
+
+	return false
 }
 
 // escapeString 转义SQL字符串

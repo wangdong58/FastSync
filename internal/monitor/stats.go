@@ -32,11 +32,13 @@ type SyncStats struct {
 
 // TableStats 单个表的统计
 type TableStats struct {
-	TableName   string
-	TotalRows   int64
-	SyncedRows  int64
-	StartTime   time.Time
-	IsCompleted bool
+	TableName       string
+	TotalRows       int64
+	SyncedRows      int64
+	StartTime       time.Time
+	IsCompleted     bool
+	BufferedRows    int64 // 当前channel中缓冲的行数
+	BufferedMemory  int64 // 估算的缓冲区内存占用（字节）
 }
 
 // NewSyncStats 创建新的统计对象
@@ -73,6 +75,24 @@ func (s *SyncStats) UpdateTableProgress(tableName string, synced int64) {
 		stats := ts.(*TableStats)
 		atomic.AddInt64(&stats.SyncedRows, synced)
 		atomic.AddInt64(&s.SyncedRows, synced)
+	}
+}
+
+// UpdateTableBuffer 更新表缓冲区统计
+func (s *SyncStats) UpdateTableBuffer(tableName string, rowsDelta int, memoryDelta int64) {
+	if ts, ok := s.activeTables.Load(tableName); ok {
+		stats := ts.(*TableStats)
+		atomic.AddInt64(&stats.BufferedRows, int64(rowsDelta))
+		atomic.AddInt64(&stats.BufferedMemory, memoryDelta)
+	}
+}
+
+// ResetTableBuffer 重置表缓冲区统计（当batch被消费后）
+func (s *SyncStats) ResetTableBuffer(tableName string, rows int64, memory int64) {
+	if ts, ok := s.activeTables.Load(tableName); ok {
+		stats := ts.(*TableStats)
+		atomic.AddInt64(&stats.BufferedRows, -rows)
+		atomic.AddInt64(&stats.BufferedMemory, -memory)
 	}
 }
 
@@ -218,6 +238,20 @@ func FormatNumber(n int64) string {
 	return fmt.Sprintf("%d", n)
 }
 
+// FormatMemory 格式化内存大小（字节→MB/GB）
+func FormatMemory(bytes int64) string {
+	if bytes >= 1024*1024*1024 {
+		return fmt.Sprintf("%.2fGB", float64(bytes)/(1024*1024*1024))
+	}
+	if bytes >= 1024*1024 {
+		return fmt.Sprintf("%.1fMB", float64(bytes)/(1024*1024))
+	}
+	if bytes >= 1024 {
+		return fmt.Sprintf("%.1fKB", float64(bytes)/1024)
+	}
+	return fmt.Sprintf("%dB", bytes)
+}
+
 // StartReporting 启动定期报告
 func (s *SyncStats) StartReporting(interval time.Duration) {
 	ticker := time.NewTicker(interval)
@@ -272,9 +306,11 @@ func (s *SyncStats) PrintProgress() {
 
 		synced := atomic.LoadInt64(&ts.SyncedRows)
 		total := ts.TotalRows
+		bufferedRows := atomic.LoadInt64(&ts.BufferedRows)
+		bufferedMem := atomic.LoadInt64(&ts.BufferedMemory)
 
-		// 格式: Overall: x% (总同步/总记录) [表名] 表进度% (表同步/表记录) | Speed | Elapsed | ETA
-		progressMsg := fmt.Sprintf("Overall: %.1f%% (%s/%s rows, %d/%d tables) [%s] %.1f%% (%s/%s) | Speed: %s/s | Elapsed: %s | ETA: %s",
+		// 格式: Overall: x% (总同步/总记录) [表名] 表进度% (表同步/表记录) | Speed | Elapsed | ETA | Buffer: 行数 (内存)
+		progressMsg := fmt.Sprintf("Overall: %.1f%% (%s/%s rows, %d/%d tables) [%s] %.1f%% (%s/%s) | Speed: %s/s | Elapsed: %s | ETA: %s | Buffer: %s (%s)",
 			overallProgress,
 			FormatNumber(totalSynced),
 			FormatNumber(totalRows),
@@ -287,6 +323,8 @@ func (s *SyncStats) PrintProgress() {
 			FormatNumber(int64(speed)),
 			FormatDuration(elapsed),
 			FormatDuration(eta),
+			FormatNumber(bufferedRows),
+			FormatMemory(bufferedMem),
 		)
 		logger.Info("  %s", progressMsg)
 	}

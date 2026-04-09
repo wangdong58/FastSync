@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/wangdong58/FastSync/internal/logger"
 )
 
 // TypeMapper SQL Server 到 MySQL 类型映射器
@@ -211,22 +213,30 @@ func (sd *SchemaDiscovery) DiscoverExtendedTable(schema, table string) (*Extende
 	// 获取列注释
 	if err := sd.discoverColumnComments(ets, schema, table); err != nil {
 		// 注释获取失败不影响主流程
-		fmt.Printf("Warning: failed to get column comments: %v\n", err)
+		logger.Warn("Failed to get column comments: %v", err)
 	}
 
 	// 获取表注释
 	if err := sd.discoverTableComment(ets, schema, table); err != nil {
-		fmt.Printf("Warning: failed to get table comment: %v\n", err)
+		logger.Warn("Failed to get table comment: %v", err)
 	}
 
 	// 获取唯一约束
 	if err := sd.discoverUniqueConstraints(ets, schema, table); err != nil {
-		fmt.Printf("Warning: failed to get unique constraints: %v\n", err)
+		logger.Warn("Failed to get unique constraints: %v", err)
+	}
+
+	// 如果表有显式主键，检查是否有 UNIQUE CLUSTERED INDEX 需要作为普通唯一约束
+	// 这种情况：PRIMARY KEY NONCLUSTERED + UNIQUE CLUSTERED INDEX
+	if ets.PrimaryKey != "" {
+		if err := sd.discoverUniqueClusteredAsConstraint(ets, schema, table); err != nil {
+			logger.Warn("Failed to get unique clustered index as constraint: %v", err)
+		}
 	}
 
 	// 获取外键约束
 	if err := sd.discoverForeignKeys(ets, schema, table); err != nil {
-		fmt.Printf("Warning: failed to get foreign keys: %v\n", err)
+		logger.Warn("Failed to get foreign keys: %v", err)
 	}
 
 	return ets, nil
@@ -339,6 +349,59 @@ func (sd *SchemaDiscovery) discoverUniqueConstraints(ets *ExtendedTableSchema, s
 	return rows.Err()
 }
 
+// discoverUniqueClusteredAsConstraint 发现 UNIQUE CLUSTERED INDEX 作为唯一约束
+// 当表有 PRIMARY KEY NONCLUSTERED 同时有 UNIQUE CLUSTERED INDEX 时，
+// 将 UNIQUE CLUSTERED INDEX 作为普通唯一约束在 MySQL 中创建
+func (sd *SchemaDiscovery) discoverUniqueClusteredAsConstraint(ets *ExtendedTableSchema, schema, table string) error {
+	query := fmt.Sprintf(`
+		SELECT
+			i.name AS index_name,
+			c.name AS column_name
+		FROM sys.indexes i
+		JOIN sys.index_columns ic ON i.object_id = ic.object_id AND i.index_id = ic.index_id
+		JOIN sys.columns c ON ic.object_id = c.object_id AND ic.column_id = c.column_id
+		WHERE i.object_id = OBJECT_ID('%s.%s')
+			AND i.is_unique = 1
+			AND i.is_primary_key = 0
+			AND i.type_desc = 'CLUSTERED'
+		ORDER BY i.name, ic.key_ordinal
+	`, schema, table)
+
+	rows, err := sd.db.Query(query)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	indexMap := make(map[string]*ConstraintSchema)
+	for rows.Next() {
+		var indexName, columnName string
+		if err := rows.Scan(&indexName, &columnName); err != nil {
+			continue
+		}
+
+		if cons, exists := indexMap[indexName]; exists {
+			cons.Columns = append(cons.Columns, columnName)
+		} else {
+			indexMap[indexName] = &ConstraintSchema{
+				Name:    indexName,
+				Type:    "UNIQUE",
+				Columns: []string{columnName},
+			}
+		}
+	}
+
+	for _, cons := range indexMap {
+		// 检查是否与主键列相同，如果相同则跳过
+		if constraintMatchesPrimaryKey(cons.Columns, ets.PrimaryKeys) {
+			continue
+		}
+		ets.Constraints = append(ets.Constraints, *cons)
+	}
+
+	return rows.Err()
+}
+
 // constraintMatchesPrimaryKey 检查约束列是否与主键列完全匹配
 func constraintMatchesPrimaryKey(constraintCols, primaryKeyCols []string) bool {
 	if len(constraintCols) != len(primaryKeyCols) {
@@ -435,7 +498,7 @@ func (ets *ExtendedTableSchema) GenerateFullCreateTableSQL() string {
 			// 检查是否为自定义函数（MySQL不支持）
 			if isCustomFunction(col.DefaultValue) {
 				// 记录警告日志
-				fmt.Printf("[WARN] Table %s, Column %s: SQL Server custom function '%s' is not supported in MySQL, skipping DEFAULT constraint\n",
+				logger.Warn("Table %s, Column %s: SQL Server custom function '%s' is not supported in MySQL, skipping DEFAULT constraint",
 					ets.TableName, col.Name, col.DefaultValue)
 			} else {
 				mysqlDefault = convertDefaultValue(col.DefaultValue)
@@ -517,13 +580,15 @@ func (ets *ExtendedTableSchema) GenerateCreateIndexSQL() []string {
 			continue
 		}
 
-		// 跳过唯一索引（已在建表时通过 CONSTRAINT 创建）
-		if idx.IsUnique {
+		// 如果是 UNIQUE CLUSTERED INDEX 但不是主键，作为普通唯一约束创建
+		// 这种情况发生在：表有 PRIMARY KEY NONCLUSTERED + UNIQUE CLUSTERED INDEX
+		if idx.IsUnique && idx.IsClustered {
+			// 作为唯一约束处理，不是主键
 			continue
 		}
 
-		// 跳过 UNIQUE CLUSTERED INDEX（在 MySQL 中作为主键创建）
-		if idx.IsUnique && idx.IsClustered {
+		// 跳过其他唯一索引（已在建表时通过 CONSTRAINT 创建）
+		if idx.IsUnique {
 			continue
 		}
 
@@ -725,8 +790,12 @@ func (sd *SchemaDiscovery) DiscoverTable(schema, table string) (*TableSchema, er
 		return nil, err
 	}
 
-	// 如果没有主键，查找 UNIQUE CLUSTERED INDEX 作为主键
-	if ts.PrimaryKey == "" {
+	// 检查是否有显式的主键（PRIMARY KEY）
+	// 注意：这里的主键来自 sys.columns 查询中的 is_primary_key 标记
+	hasExplicitPrimaryKey := ts.PrimaryKey != ""
+
+	// 如果没有显式主键，查找 UNIQUE CLUSTERED INDEX 作为主键
+	if !hasExplicitPrimaryKey {
 		for _, idx := range ts.Indexes {
 			if idx.IsUnique && idx.IsClustered && len(idx.Columns) > 0 {
 				// 设置复合主键的所有字段
@@ -753,8 +822,27 @@ func (sd *SchemaDiscovery) DiscoverTable(schema, table string) (*TableSchema, er
 			}
 		}
 	} else {
-		// 有主键时，也填充 PrimaryKeys 数组
-		ts.PrimaryKeys = []string{ts.PrimaryKey}
+		// 有显式主键时，填充 PrimaryKeys 数组
+		// 需要从索引信息中获取完整的主键列列表（支持复合主键）
+		for _, idx := range ts.Indexes {
+			if idx.IsPrimary {
+				ts.PrimaryKeys = idx.Columns
+				// 同时更新列的 IsPrimaryKey 标记
+				for i := range ts.Columns {
+					for _, pkCol := range idx.Columns {
+						if ts.Columns[i].Name == pkCol {
+							ts.Columns[i].IsPrimaryKey = true
+							break
+						}
+					}
+				}
+				break
+			}
+		}
+		// 如果没有找到主键索引，使用单字段主键
+		if len(ts.PrimaryKeys) == 0 {
+			ts.PrimaryKeys = []string{ts.PrimaryKey}
+		}
 	}
 
 	return ts, nil

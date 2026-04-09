@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 
 	"github.com/wangdong58/FastSync/internal/database"
+	"github.com/wangdong58/FastSync/internal/logger"
 )
 
 // Comparator 数据对比器
@@ -115,7 +116,7 @@ func (c *Comparator) CompareTable(sourceTable, targetTable string, sampleRate fl
 		TargetTable: targetTable,
 	}
 
-	fmt.Printf("\nComparing table: %s <-> %s\n", sourceTable, targetTable)
+	logger.Info("\nComparing table: %s <-> %s", sourceTable, targetTable)
 
 	// 1. 对比行数
 	sourceCount, targetCount, countMatch, err := c.compareRowCount(sourceTable, targetTable)
@@ -127,11 +128,11 @@ func (c *Comparator) CompareTable(sourceTable, targetTable string, sampleRate fl
 	result.TargetCount = targetCount
 	result.CountMatch = countMatch
 
-	fmt.Printf("  [%s] Source count: %d, Target count: %d, Match: %v\n",
+	logger.Info("  [%s] Source count: %d, Target count: %d, Match: %v",
 		sourceTable, sourceCount, targetCount, countMatch)
 
 	if !countMatch {
-		fmt.Printf("  WARNING: Row count mismatch!\n")
+		logger.Warn("  WARNING: Row count mismatch!")
 	}
 
 	// 2. 抽样对比数据内容
@@ -150,9 +151,9 @@ func (c *Comparator) CompareTable(sourceTable, targetTable string, sampleRate fl
 			result.ColumnStats = sampleResult.ColumnStats
 
 			if sampleResult.NoPKUK {
-				fmt.Printf("  [%s] [NO_PK_UK] No primary/unique key - comparing row counts and column min/max only\n", sourceTable)
+				logger.Info("  [%s] [NO_PK_UK] No primary/unique key - comparing row counts and column min/max only", sourceTable)
 			} else {
-				fmt.Printf("  [%s] Sampled: %d, Matched: %d, Mismatched: %d\n",
+				logger.Info("  [%s] Sampled: %d, Matched: %d, Mismatched: %d",
 					sourceTable, sampleResult.SampledRows, sampleResult.MatchedRows, sampleResult.MismatchedRows)
 			}
 		}
@@ -1017,9 +1018,9 @@ func buildKeyString(keyColumns []string, keyValues []interface{}) string {
 	return strings.Join(parts, ", ")
 }
 func PrintCompareSummary(results []CompareResult) {
-	fmt.Println("\n========================================")
-	fmt.Println("         COMPARE SUMMARY")
-	fmt.Println("========================================")
+	logger.Info("\n========================================")
+	logger.Info("         COMPARE SUMMARY")
+	logger.Info("========================================")
 
 	allMatch := true
 	for _, r := range results {
@@ -1035,13 +1036,13 @@ func PrintCompareSummary(results []CompareResult) {
 			tag = " [NO_PK_UK]"
 		}
 
-		fmt.Printf("\nTable: %s -> %s [%s]%s\n", r.SourceTable, r.TargetTable, status, tag)
-		fmt.Printf("  Row Count: %d vs %d\n", r.SourceCount, r.TargetCount)
+		logger.Info("\nTable: %s -> %s [%s]%s", r.SourceTable, r.TargetTable, status, tag)
+		logger.Info("  Row Count: %d vs %d", r.SourceCount, r.TargetCount)
 
 		// 无主键和唯一键表的显示
 		if r.NoPKUK {
 			if len(r.ColumnStats) > 0 {
-				fmt.Printf("  Column Min/Max Comparison:\n")
+				logger.Info("  Column Min/Max Comparison:")
 				for _, stat := range r.ColumnStats {
 					minStatus := "OK"
 					if !stat.MinMatch {
@@ -1053,27 +1054,27 @@ func PrintCompareSummary(results []CompareResult) {
 						maxStatus = "DIFF"
 						allMatch = false
 					}
-					fmt.Printf("    %s: Min[%s] Max[%s]\n", stat.ColumnName, minStatus, maxStatus)
+					logger.Info("    %s: Min[%s] Max[%s]", stat.ColumnName, minStatus, maxStatus)
 					if !stat.MinMatch {
-						fmt.Printf("      Source Min: %v | Target Min: %v\n",
+						logger.Error("      Source Min: %v | Target Min: %v",
 							formatValue(stat.SourceMin), formatValue(stat.TargetMin))
 					}
 					if !stat.MaxMatch {
-						fmt.Printf("      Source Max: %v | Target Max: %v\n",
+						logger.Error("      Source Max: %v | Target Max: %v",
 							formatValue(stat.SourceMax), formatValue(stat.TargetMax))
 					}
 				}
 			}
 		} else if r.SampledRows > 0 {
-			fmt.Printf("  Sampled: %d\n", r.SampledRows)
-			fmt.Printf("  Matched: %d, Mismatched: %d\n", r.MatchedRows, r.MismatchedRows)
-			fmt.Printf("  Source Only: %d, Target Only: %d\n", r.SourceOnlyRows, r.TargetOnlyRows)
+			logger.Info("  Sampled: %d", r.SampledRows)
+			logger.Info("  Matched: %d, Mismatched: %d", r.MatchedRows, r.MismatchedRows)
+			logger.Info("  Source Only: %d, Target Only: %d", r.SourceOnlyRows, r.TargetOnlyRows)
 		}
 		if len(r.Errors) > 0 {
-			fmt.Printf("  Errors: %d\n", len(r.Errors))
+			logger.Error("  Errors: %d", len(r.Errors))
 		}
 		if len(r.SampleMismatches) > 0 {
-			fmt.Printf("\n  Sample Mismatch Records:\n")
+			logger.Error("\n  Sample Mismatch Records:")
 			for i, m := range r.SampleMismatches {
 				keyType := m.KeyType
 				if keyType == "" {
@@ -1084,8 +1085,8 @@ func PrintCompareSummary(results []CompareResult) {
 				if len(m.KeyColumns) > 1 {
 					keyDisplay = fmt.Sprintf("(%s)", m.Key)
 				}
-				fmt.Printf("  --- Record %d (%s: %s) ---\n", i+1, keyType, keyDisplay)
-				fmt.Printf("    Diff Columns: %v\n", m.DiffCols)
+				logger.Error("  --- Record %d (%s: %s) ---", i+1, keyType, keyDisplay)
+				logger.Error("    Diff Columns: %v", m.DiffCols)
 				for _, col := range m.DiffCols {
 					srcVal := "NULL"
 					tgtVal := "NULL"
@@ -1111,19 +1112,19 @@ func PrintCompareSummary(results []CompareResult) {
 							tgtVal = tgtVal[:100] + "..."
 						}
 					}
-					fmt.Printf("    %s: Source=%s | Target=%s\n", col, srcVal, tgtVal)
+					logger.Error("    %s: Source=%s | Target=%s", col, srcVal, tgtVal)
 				}
 			}
 		}
 	}
 
-	fmt.Println("\n========================================")
+	logger.Info("\n========================================")
 	if allMatch {
-		fmt.Println("Result: ALL TABLES MATCH")
+		logger.Info("Result: ALL TABLES MATCH")
 	} else {
-		fmt.Println("Result: SOME TABLES HAVE MISMATCHES")
+		logger.Error("Result: SOME TABLES HAVE MISMATCHES")
 	}
-	fmt.Println("========================================")
+	logger.Info("========================================")
 }
 
 // formatValue 格式化值用于显示

@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/wangdong58/FastSync/internal/config"
+	"github.com/wangdong58/FastSync/internal/logger"
 )
 
 // Validator 结构校验器
@@ -103,7 +104,7 @@ func (v *Validator) ValidateAllTables(tables []config.TableConfig) ([]Validation
 	results := make([]ValidationResult, 0, len(tables))
 
 	for _, table := range tables {
-		fmt.Printf("Validating table: %s -> %s\n", table.Source, table.Target)
+		logger.Info("Validating table: %s -> %s", table.Source, table.Target)
 
 		// 获取源端表结构
 		schemaParts := strings.Split(table.Source, ".")
@@ -119,14 +120,14 @@ func (v *Validator) ValidateAllTables(tables []config.TableConfig) ([]Validation
 		sd := NewSchemaDiscovery(v.sourceDB)
 		sourceSchema, err := sd.DiscoverExtendedTable(schemaName, tableName)
 		if err != nil {
-			fmt.Printf("  Error: failed to discover source schema: %v\n", err)
+			logger.Error("  Failed to discover source schema: %v", err)
 			continue
 		}
 
 		// 校验
 		result, err := v.ValidateTable(sourceSchema, table.Target)
 		if err != nil {
-			fmt.Printf("  Error: validation failed: %v\n", err)
+			logger.Error("  Validation failed: %v", err)
 			continue
 		}
 
@@ -451,42 +452,42 @@ func compareTypes(type1, type2 string) bool {
 // printValidationResult 打印校验结果
 func (v *Validator) printValidationResult(result *ValidationResult) {
 	if result.MissingInTarget {
-		fmt.Printf("  ✗ Table does not exist in target\n")
+		logger.Error("  ✗ Table does not exist in target")
 		return
 	}
 
 	if result.IsValid() {
-		fmt.Printf("  ✓ Schema matches\n")
+		logger.Info("  ✓ Schema matches")
 		return
 	}
 
 	if len(result.ColumnDiffs) > 0 {
-		fmt.Printf("  ✗ Column differences: %d\n", len(result.ColumnDiffs))
+		logger.Error("  ✗ Column differences: %d", len(result.ColumnDiffs))
 		for _, diff := range result.ColumnDiffs {
-			fmt.Printf("    - %s: %s\n", diff.ColumnName, diff.DiffType)
+			logger.Error("    - %s: %s", diff.ColumnName, diff.DiffType)
 		}
 	}
 
 	if len(result.IndexDiffs) > 0 {
-		fmt.Printf("  ✗ Index differences: %d\n", len(result.IndexDiffs))
+		logger.Error("  ✗ Index differences: %d", len(result.IndexDiffs))
 		for _, diff := range result.IndexDiffs {
-			fmt.Printf("    - %s: %s\n", diff.IndexName, diff.DiffType)
+			logger.Error("    - %s: %s", diff.IndexName, diff.DiffType)
 		}
 	}
 
 	if len(result.ConstraintDiffs) > 0 {
-		fmt.Printf("  ✗ Constraint differences: %d\n", len(result.ConstraintDiffs))
+		logger.Error("  ✗ Constraint differences: %d", len(result.ConstraintDiffs))
 		for _, diff := range result.ConstraintDiffs {
-			fmt.Printf("    - %s: %s\n", diff.ConstraintName, diff.DiffType)
+			logger.Error("    - %s: %s", diff.ConstraintName, diff.DiffType)
 		}
 	}
 }
 
 // PrintValidationSummary 打印校验摘要
 func PrintValidationSummary(results []ValidationResult) {
-	fmt.Println("\n========================================")
-	fmt.Println("         SCHEMA VALIDATION SUMMARY")
-	fmt.Println("========================================")
+	logger.Info("\n========================================")
+	logger.Info("         SCHEMA VALIDATION SUMMARY")
+	logger.Info("========================================")
 
 	validCount := 0
 	invalidCount := 0
@@ -502,18 +503,18 @@ func PrintValidationSummary(results []ValidationResult) {
 		}
 	}
 
-	fmt.Printf("Total Tables:    %d\n", len(results))
-	fmt.Printf("Valid:           %d\n", validCount)
-	fmt.Printf("Invalid:         %d\n", invalidCount)
-	fmt.Printf("Missing:         %d\n", missingCount)
+	logger.Info("Total Tables:    %d", len(results))
+	logger.Info("Valid:           %d", validCount)
+	logger.Info("Invalid:         %d", invalidCount)
+	logger.Info("Missing:         %d", missingCount)
 
 	if invalidCount > 0 || missingCount > 0 {
-		fmt.Println("\nDetails:")
+		logger.Info("\nDetails:")
 		for _, result := range results {
 			if !result.IsValid() || result.MissingInTarget {
-				fmt.Printf("  - %s: ", result.TableName)
+				logger.Error("  - %s: ", result.TableName)
 				if result.MissingInTarget {
-					fmt.Println("MISSING")
+					logger.Error("MISSING")
 				} else {
 					parts := []string{}
 					if len(result.ColumnDiffs) > 0 {
@@ -525,11 +526,11 @@ func PrintValidationSummary(results []ValidationResult) {
 					if len(result.ConstraintDiffs) > 0 {
 						parts = append(parts, fmt.Sprintf("%d constraints", len(result.ConstraintDiffs)))
 					}
-					fmt.Println(strings.Join(parts, ", "))
+					logger.Error(strings.Join(parts, ", "))
 				}
 			}
 		}
 	}
 
-	fmt.Println("========================================")
+	logger.Info("========================================")
 }

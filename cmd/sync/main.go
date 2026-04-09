@@ -141,9 +141,14 @@ func runSync(cfg *config.Config, sourceDB, targetDB *database.Connection) {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
-	// 启动同步
+	// 启动同步（带panic恢复）
 	done := make(chan error, 1)
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				logger.Fatal("Sync panic: %v", r)
+			}
+		}()
 		done <- engine.Run()
 	}()
 

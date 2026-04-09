@@ -22,9 +22,12 @@ type Connection struct {
 func NewSQLServerConnection(cfg config.DBConfig) (*Connection, error) {
 	query := url.Values{}
 	query.Add("database", cfg.Database)
-	// 添加超时参数，支持大表查询
-	query.Add("connection+timeout", "300")
-	query.Add("query+timeout", "300")
+	// 添加超时参数，防止查询挂起
+	query.Add("connection+timeout", "60")  // 连接超时60秒
+	query.Add("query+timeout", "180")      // 查询超时180秒
+	query.Add("dial+timeout", "30")        // 拨号超时30秒
+	query.Add("read+timeout", "60")        // 读取超时60秒
+	query.Add("write+timeout", "60")       // 写入超时60秒
 
 	// 添加额外参数
 	for k, v := range cfg.Params {

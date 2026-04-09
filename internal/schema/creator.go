@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"github.com/wangdong58/FastSync/internal/logger"
 )
 
 // Creator 结构创建器
@@ -56,7 +58,7 @@ func (c *Creator) CreateConstraints(schema *ExtendedTableSchema) error {
 
 			if _, err := c.db.Exec(sql); err != nil {
 				// 外键创建失败打印警告但不中断
-				fmt.Printf("Warning: failed to create foreign key %s: %v\n", cons.Name, err)
+				logger.Warn("Failed to create foreign key %s: %v", cons.Name, err)
 			}
 		}
 	}
@@ -78,7 +80,7 @@ func (c *Creator) AddColumnComments(schema *ExtendedTableSchema) error {
 			escapeString(comment))
 
 		if _, err := c.db.Exec(sql); err != nil {
-			fmt.Printf("Warning: failed to add comment for column %s: %v\n", colName, err)
+			logger.Warn("Failed to add comment for column %s: %v", colName, err)
 		}
 	}
 	return nil
@@ -87,17 +89,17 @@ func (c *Creator) AddColumnComments(schema *ExtendedTableSchema) error {
 // CreateSchemaForTables 为一组表创建结构
 func (c *Creator) CreateSchemaForTables(schemas []*ExtendedTableSchema, dryRun bool) error {
 	for _, schema := range schemas {
-		fmt.Printf("Creating table: %s\n", schema.TableName)
+		logger.Info("Creating table: %s", schema.TableName)
 
 		if dryRun {
 			// 仅打印SQL
-			fmt.Printf("  Table SQL:\n%s;\n\n", schema.GenerateFullCreateTableSQL())
+			logger.Info("Table SQL:\n%s;", schema.GenerateFullCreateTableSQL())
 
 			indexSQLs := schema.GenerateCreateIndexSQL()
 			for _, sql := range indexSQLs {
-				fmt.Printf("  Index SQL:\n%s;\n", sql)
+				logger.Info("  Index SQL:\n%s;", sql)
 			}
-			fmt.Println()
+			logger.Info("")
 			continue
 		}
 
@@ -105,19 +107,19 @@ func (c *Creator) CreateSchemaForTables(schemas []*ExtendedTableSchema, dryRun b
 		if err := c.CreateTable(schema); err != nil {
 			return fmt.Errorf("create table %s failed: %w", schema.TableName, err)
 		}
-		fmt.Printf("  ✓ Table created\n")
+		logger.Info("  ✓ Table created")
 
 		// 创建索引
 		if err := c.CreateIndexes(schema); err != nil {
 			return fmt.Errorf("create indexes for %s failed: %w", schema.TableName, err)
 		}
-		fmt.Printf("  ✓ Indexes created\n")
+		logger.Info("  ✓ Indexes created")
 
 		// 创建外键约束
 		if err := c.CreateConstraints(schema); err != nil {
 			return fmt.Errorf("create constraints for %s failed: %w", schema.TableName, err)
 		}
-		fmt.Printf("  ✓ Constraints created\n")
+		logger.Info("  ✓ Constraints created")
 	}
 
 	return nil

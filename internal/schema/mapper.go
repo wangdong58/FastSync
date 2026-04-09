@@ -145,11 +145,12 @@ func NewSchemaDiscovery(db *sql.DB) *SchemaDiscovery {
 
 // TableSchema 表结构
 type TableSchema struct {
-	SchemaName string
-	TableName  string
-	Columns    []ColumnSchema
-	Indexes    []IndexSchema
-	PrimaryKey string
+	SchemaName  string
+	TableName   string
+	Columns     []ColumnSchema
+	Indexes     []IndexSchema
+	PrimaryKey  string   // 主键字段（单个或复合主键的第一个字段，用于分段）
+	PrimaryKeys []string // 复合主键的所有字段
 }
 
 // ColumnSchema 列结构
@@ -168,10 +169,11 @@ type ColumnSchema struct {
 
 // IndexSchema 索引结构
 type IndexSchema struct {
-	Name      string
-	IsUnique  bool
-	IsPrimary bool
-	Columns   []string
+	Name        string
+	IsUnique    bool
+	IsPrimary   bool
+	IsClustered bool   // UNIQUE CLUSTERED INDEX 应被视为 MySQL 的主键
+	Columns     []string
 }
 
 // ConstraintSchema 约束结构（唯一约束、外键等）
@@ -286,7 +288,7 @@ func (sd *SchemaDiscovery) discoverTableComment(ets *ExtendedTableSchema, schema
 	return nil
 }
 
-// discoverUniqueConstraints 获取唯一约束
+// discoverUniqueConstraints 获取唯一约束（排除 CLUSTERED 索引，因为它们已被处理为主键）
 func (sd *SchemaDiscovery) discoverUniqueConstraints(ets *ExtendedTableSchema, schema, table string) error {
 	query := fmt.Sprintf(`
 		SELECT
@@ -298,6 +300,7 @@ func (sd *SchemaDiscovery) discoverUniqueConstraints(ets *ExtendedTableSchema, s
 		WHERE i.object_id = OBJECT_ID('%s.%s')
 			AND i.is_unique = 1
 			AND i.is_primary_key = 0
+			AND i.type_desc = 'NONCLUSTERED'
 		ORDER BY i.name, ic.key_ordinal
 	`, schema, table)
 
@@ -326,10 +329,32 @@ func (sd *SchemaDiscovery) discoverUniqueConstraints(ets *ExtendedTableSchema, s
 	}
 
 	for _, cons := range constraintMap {
+		// 额外检查：如果约束的列与主键列完全相同，则跳过（避免重复）
+		if constraintMatchesPrimaryKey(cons.Columns, ets.PrimaryKeys) {
+			continue
+		}
 		ets.Constraints = append(ets.Constraints, *cons)
 	}
 
 	return rows.Err()
+}
+
+// constraintMatchesPrimaryKey 检查约束列是否与主键列完全匹配
+func constraintMatchesPrimaryKey(constraintCols, primaryKeyCols []string) bool {
+	if len(constraintCols) != len(primaryKeyCols) {
+		return false
+	}
+	// 创建集合进行比较
+	constraintSet := make(map[string]bool)
+	for _, col := range constraintCols {
+		constraintSet[strings.ToLower(col)] = true
+	}
+	for _, col := range primaryKeyCols {
+		if !constraintSet[strings.ToLower(col)] {
+			return false
+		}
+	}
+	return true
 }
 
 // discoverForeignKeys 获取外键约束
@@ -428,7 +453,8 @@ func (ets *ExtendedTableSchema) GenerateFullCreateTableSQL() string {
 
 		sb.WriteString(fmt.Sprintf("    %s %s", col.Name, colDef))
 
-		if !col.IsNullable {
+		// MySQL 要求主键列必须是 NOT NULL
+		if !col.IsNullable || col.IsPrimaryKey {
 			sb.WriteString(" NOT NULL")
 		}
 
@@ -444,13 +470,21 @@ func (ets *ExtendedTableSchema) GenerateFullCreateTableSQL() string {
 	}
 
 	// 主键约束（如果存在且未在列上定义）
-	if ets.PrimaryKey != "" {
+	if len(ets.PrimaryKeys) > 0 {
+		// 使用复合主键的所有字段
+		sb.WriteString(fmt.Sprintf(",\n    PRIMARY KEY (%s)", strings.Join(ets.PrimaryKeys, ", ")))
+	} else if ets.PrimaryKey != "" {
+		// 单个主键字段（向后兼容）
 		sb.WriteString(fmt.Sprintf(",\n    PRIMARY KEY (%s)", ets.PrimaryKey))
 	}
 
-	// 唯一约束
+	// 唯一约束（跳过与主键列完全相同的约束）
 	for _, cons := range ets.Constraints {
 		if cons.Type == "UNIQUE" {
+			// 跳过与主键列完全相同的唯一约束
+			if constraintMatchesPrimaryKey(cons.Columns, ets.PrimaryKeys) {
+				continue
+			}
 			sb.WriteString(fmt.Sprintf(",\n    CONSTRAINT %s UNIQUE (%s)",
 				cons.Name, strings.Join(cons.Columns, ", ")))
 		}
@@ -466,7 +500,7 @@ func (ets *ExtendedTableSchema) GenerateFullCreateTableSQL() string {
 	return sb.String()
 }
 
-// GenerateCreateIndexSQL 生成创建索引的SQL语句（不包括唯一索引，已在建表时创建）
+// GenerateCreateIndexSQL 生成创建索引的SQL语句（不包括唯一索引和主键，已在建表时创建）
 func (ets *ExtendedTableSchema) GenerateCreateIndexSQL() []string {
 	var sqls []string
 
@@ -478,6 +512,11 @@ func (ets *ExtendedTableSchema) GenerateCreateIndexSQL() []string {
 
 		// 跳过唯一索引（已在建表时通过 CONSTRAINT 创建）
 		if idx.IsUnique {
+			continue
+		}
+
+		// 跳过 UNIQUE CLUSTERED INDEX（在 MySQL 中作为主键创建）
+		if idx.IsUnique && idx.IsClustered {
 			continue
 		}
 
@@ -562,7 +601,7 @@ func (sd *SchemaDiscovery) DiscoverTable(schema, table string) (*TableSchema, er
 			c.max_length,
 			c.precision,
 			c.scale,
-			c.is_nullable,
+			CAST(c.is_nullable AS INT) as is_nullable,
 			ISNULL(dc.definition, '') as default_value,
 			CASE WHEN pk.column_id IS NOT NULL THEN 1 ELSE 0 END as is_primary_key,
 			CASE WHEN c.is_identity = 1 THEN 1 ELSE 0 END as is_identity
@@ -588,13 +627,14 @@ func (sd *SchemaDiscovery) DiscoverTable(schema, table string) (*TableSchema, er
 	for rows.Next() {
 		var col ColumnSchema
 		var isPK, isIdentity int
+		var isNullable int  // SQL Server BIT 类型用 INT 接收
 		err := rows.Scan(
 			&col.Name,
 			&col.SourceType,
 			&col.MaxLength,
 			&col.Precision,
 			&col.Scale,
-			&col.IsNullable,
+			&isNullable,
 			&col.DefaultValue,
 			&isPK,
 			&isIdentity,
@@ -603,6 +643,7 @@ func (sd *SchemaDiscovery) DiscoverTable(schema, table string) (*TableSchema, er
 			return nil, err
 		}
 
+		col.IsNullable = isNullable == 1  // 转换为 bool
 		col.IsPrimaryKey = isPK == 1
 		col.IsIdentity = isIdentity == 1
 		if col.IsPrimaryKey {
@@ -625,6 +666,38 @@ func (sd *SchemaDiscovery) DiscoverTable(schema, table string) (*TableSchema, er
 		return nil, err
 	}
 
+	// 如果没有主键，查找 UNIQUE CLUSTERED INDEX 作为主键
+	if ts.PrimaryKey == "" {
+		for _, idx := range ts.Indexes {
+			if idx.IsUnique && idx.IsClustered && len(idx.Columns) > 0 {
+				// 设置复合主键的所有字段
+				ts.PrimaryKeys = idx.Columns
+				// 第一个列用于分段
+				ts.PrimaryKey = idx.Columns[0]
+				// 标记该索引为主键
+				for i := range ts.Indexes {
+					if ts.Indexes[i].Name == idx.Name {
+						ts.Indexes[i].IsPrimary = true
+						break
+					}
+				}
+				// 同时更新列的 IsPrimaryKey 标记（所有主键列）
+				for i := range ts.Columns {
+					for _, pkCol := range idx.Columns {
+						if ts.Columns[i].Name == pkCol {
+							ts.Columns[i].IsPrimaryKey = true
+							break
+						}
+					}
+				}
+				break
+			}
+		}
+	} else {
+		// 有主键时，也填充 PrimaryKeys 数组
+		ts.PrimaryKeys = []string{ts.PrimaryKey}
+	}
+
 	return ts, nil
 }
 
@@ -635,6 +708,7 @@ func (sd *SchemaDiscovery) DiscoverIndexes(schema, table string) ([]IndexSchema,
 			i.name as index_name,
 			i.is_unique,
 			i.is_primary_key,
+			i.type_desc,
 			c.name as column_name
 		FROM sys.indexes i
 		JOIN sys.index_columns ic ON i.object_id = ic.object_id AND i.index_id = ic.index_id
@@ -651,9 +725,9 @@ func (sd *SchemaDiscovery) DiscoverIndexes(schema, table string) ([]IndexSchema,
 
 	indexMap := make(map[string]*IndexSchema)
 	for rows.Next() {
-		var indexName, columnName string
+		var indexName, columnName, typeDesc string
 		var isUnique, isPrimary bool
-		err := rows.Scan(&indexName, &isUnique, &isPrimary, &columnName)
+		err := rows.Scan(&indexName, &isUnique, &isPrimary, &typeDesc, &columnName)
 		if err != nil {
 			return nil, err
 		}
@@ -662,10 +736,11 @@ func (sd *SchemaDiscovery) DiscoverIndexes(schema, table string) ([]IndexSchema,
 			idx.Columns = append(idx.Columns, columnName)
 		} else {
 			indexMap[indexName] = &IndexSchema{
-				Name:      indexName,
-				IsUnique:  isUnique,
-				IsPrimary: isPrimary,
-				Columns:   []string{columnName},
+				Name:        indexName,
+				IsUnique:    isUnique,
+				IsPrimary:   isPrimary,
+				IsClustered: typeDesc == "CLUSTERED",
+				Columns:     []string{columnName},
 			}
 		}
 	}

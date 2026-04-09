@@ -215,7 +215,12 @@ func (e *Engine) syncTable(tableConfig config.TableConfig, tableIndex int, total
 	// 注册表到统计中
 	tableStats := e.stats.StartTable(tableConfig.Source, totalRows)
 
-	logger.Info("[%d/%d] [%s] Estimated rows: %d, Primary key: %s", tableIndex, totalTables, tableConfig.Source, totalRows, ts.PrimaryKey)
+	// 显示主键信息（包括复合主键）
+	pkInfo := ts.PrimaryKey
+	if len(ts.PrimaryKeys) > 1 {
+		pkInfo = fmt.Sprintf("%s (composite: %s)", ts.PrimaryKey, strings.Join(ts.PrimaryKeys, ", "))
+	}
+	logger.Info("[%d/%d] [%s] Estimated rows: %d, Primary key: %s", tableIndex, totalTables, tableConfig.Source, totalRows, pkInfo)
 
 	// 如果需要，清空目标表
 	if tableConfig.TruncateBeforeSync {

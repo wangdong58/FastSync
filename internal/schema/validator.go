@@ -261,6 +261,9 @@ func (v *Validator) getTargetTableSchema(tableName string) (*ExtendedTableSchema
 		schema.Indexes = append(schema.Indexes, *idx)
 		if idx.IsPrimary && len(idx.Columns) > 0 {
 			schema.PrimaryKey = idx.Columns[0]
+			schema.PrimaryKeys = idx.Columns // 保存复合主键的所有字段
+			// MySQL InnoDB 中 PRIMARY KEY 是聚簇索引
+			idx.IsClustered = true
 		}
 		// 将唯一索引（非主键）也作为约束添加，以便与SQL Server的约束比较
 		if idx.IsUnique && !idx.IsPrimary {
@@ -325,10 +328,30 @@ func (v *Validator) compareIndexes(source, target *ExtendedTableSchema, result *
 		targetIdxMap[strings.ToLower(idx.Name)] = idx
 	}
 
+	// 检查源端是否有 UNIQUE CLUSTERED INDEX 被用作主键
+	sourceHasUniqueClusteredAsPK := false
+	var sourceUniqueClusteredIdx *IndexSchema
+	for i := range source.Indexes {
+		if source.Indexes[i].IsUnique && source.Indexes[i].IsClustered {
+			sourceHasUniqueClusteredAsPK = true
+			sourceUniqueClusteredIdx = &source.Indexes[i]
+			break
+		}
+	}
+
 	for _, srcIdx := range source.Indexes {
 		// 跳过主键索引
 		if srcIdx.IsPrimary {
 			continue
+		}
+
+		// 如果是 UNIQUE CLUSTERED INDEX，检查目标端是否有对应的主键
+		if srcIdx.IsUnique && srcIdx.IsClustered {
+			// 检查目标端是否有主键且列匹配
+			if target.PrimaryKey != "" && primaryKeysMatch(srcIdx.Columns, target.PrimaryKeys) {
+				// 目标端有匹配的主键，视为匹配（UNIQUE CLUSTERED INDEX 在 MySQL 中映射为主键）
+				continue
+			}
 		}
 
 		tgtIdx, exists := targetIdxMap[strings.ToLower(srcIdx.Name)]
@@ -348,6 +371,27 @@ func (v *Validator) compareIndexes(source, target *ExtendedTableSchema, result *
 			})
 		}
 	}
+
+	// 如果源端有 UNIQUE CLUSTERED INDEX 但目标端没有匹配的主键，报告差异
+	if sourceHasUniqueClusteredAsPK && target.PrimaryKey == "" {
+		result.IndexDiffs = append(result.IndexDiffs, IndexDiff{
+			IndexName: sourceUniqueClusteredIdx.Name,
+			DiffType:  "MISSING_IN_TARGET",
+		})
+	}
+}
+
+// primaryKeysMatch 比较两个主键列列表是否匹配
+func primaryKeysMatch(sourceCols, targetCols []string) bool {
+	if len(sourceCols) != len(targetCols) {
+		return false
+	}
+	for i, col := range sourceCols {
+		if strings.ToLower(col) != strings.ToLower(targetCols[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 // compareConstraints 对比约束差异
@@ -387,7 +431,7 @@ func compareTypes(type1, type2 string) bool {
 		"CHAR":      "CHAR",
 		"TEXT":      "TEXT",
 		"DATETIME":  "DATETIME",
-		"TIMESTAMP": "TIMESTAMP",
+		"TIMESTAMP": "DATETIME", // TIMESTAMP 和 DATETIME 在 MySQL 中功能兼容
 		"DECIMAL":   "DECIMAL",
 		"NUMERIC":   "DECIMAL",
 		"FLOAT":     "FLOAT",

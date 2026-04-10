@@ -99,6 +99,9 @@ monitor:
 compare:
   # 同步完成后是否自动对比
   auto_compare: true
+  # 仅对比数据量（行数），不对比内容
+  # 设置为true时，只对比源端和目标表的行数是否一致
+  count_only: false
   # 对比抽样比例（0-1，1为全量对比）
   # 对于十亿级数据，建议使用0.001或更低
   sample_rate: 0.01

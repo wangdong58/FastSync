@@ -87,7 +87,7 @@ func (c *Comparator) CompareTables(tables []TablePair) ([]CompareResult, error) 
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			result, err := c.CompareTable(t.Source, t.Target, t.SampleRate)
+			result, err := c.CompareTable(t.Source, t.Target, t.SampleRate, t.CountOnly)
 			if err != nil {
 				result.Errors = append(result.Errors, err.Error())
 			}
@@ -107,10 +107,11 @@ type TablePair struct {
 	Source     string
 	Target     string
 	SampleRate float64
+	CountOnly  bool // 仅对比数据量（行数）
 }
 
 // CompareTable 对比单个表
-func (c *Comparator) CompareTable(sourceTable, targetTable string, sampleRate float64) (CompareResult, error) {
+func (c *Comparator) CompareTable(sourceTable, targetTable string, sampleRate float64, countOnly bool) (CompareResult, error) {
 	result := CompareResult{
 		SourceTable: sourceTable,
 		TargetTable: targetTable,
@@ -133,6 +134,12 @@ func (c *Comparator) CompareTable(sourceTable, targetTable string, sampleRate fl
 
 	if !countMatch {
 		logger.Warn("  WARNING: Row count mismatch!")
+	}
+
+	// 如果仅对比行数，跳过抽样对比
+	if countOnly {
+		logger.Info("  [%s] Count-only mode, skipping data content comparison", sourceTable)
+		return result, nil
 	}
 
 	// 2. 抽样对比数据内容

@@ -44,21 +44,21 @@ LDFLAGS="-X main.version=$VERSION -X main.buildTime=$BUILD_TIME"
 echo -e "${YELLOW}Building...${NC}"
 
 # Standard build
-echo "  -> Building sync-tool..."
-go build -ldflags "$LDFLAGS" -o build/sync-tool ./cmd/sync
+echo "  -> Building fastsync..."
+go build -ldflags "$LDFLAGS" -o build/fastsync ./cmd/sync
 
 # Static build (recommended for deployment)
-echo "  -> Building sync-tool-static..."
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "$LDFLAGS" -a -installsuffix cgo -o build/sync-tool-static ./cmd/sync
+echo "  -> Building fastsync-static..."
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "$LDFLAGS" -a -installsuffix cgo -o build/fastsync-static ./cmd/sync
 
 echo ""
 echo -e "${GREEN}Build completed successfully!${NC}"
 echo ""
 echo "Binaries:"
-echo "  - build/sync-tool         (dynamic build)"
-echo "  - build/sync-tool-static  (static build for deployment)"
+echo "  - build/fastsync         (dynamic build)"
+echo "  - build/fastsync-static  (static build for deployment)"
 echo ""
 echo "Usage:"
-echo "  ./build/sync-tool -c config.yaml"
-echo "  ./build/sync-tool -c config.yaml --create-schema --dry-run"
+echo "  ./build/fastsync -c config.yaml"
+echo "  ./build/fastsync -c config.yaml --create-schema --dry-run"
 echo ""

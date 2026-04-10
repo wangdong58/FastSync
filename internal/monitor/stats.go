@@ -17,12 +17,16 @@ type SyncStats struct {
 	EndTime         time.Time
 	TotalTables     int
 	CompletedTables int64 // 改为 int64 以支持原子操作
+	FailedTables    int64 // 失败的表数量
 	TotalRows       int64
 	SyncedRows      int64
 	FailedRows      int64
 
 	// 当前活跃表统计（多表并发时使用）
 	activeTables sync.Map // map[string]*TableStats
+
+	// 失败表详情
+	failedTableDetails sync.Map // map[string]string (表名 -> 错误信息)
 
 	// 速度计算
 	mu             sync.RWMutex
@@ -67,6 +71,22 @@ func (s *SyncStats) CompleteTable(tableName string) {
 		s.activeTables.Delete(tableName)
 		atomic.AddInt64(&s.CompletedTables, 1)
 	}
+}
+
+// RecordFailedTable 记录失败的表
+func (s *SyncStats) RecordFailedTable(tableName string, errMsg string) {
+	s.failedTableDetails.Store(tableName, errMsg)
+	atomic.AddInt64(&s.FailedTables, 1)
+}
+
+// GetFailedTables 获取所有失败的表
+func (s *SyncStats) GetFailedTables() map[string]string {
+	failed := make(map[string]string)
+	s.failedTableDetails.Range(func(key, value interface{}) bool {
+		failed[key.(string)] = value.(string)
+		return true
+	})
+	return failed
 }
 
 // UpdateTableProgress 更新表进度
@@ -337,6 +357,7 @@ func (s *SyncStats) PrintSummary() {
 	logger.Info("========================================")
 	logger.Info("Total Tables:     %d", s.TotalTables)
 	logger.Info("Completed Tables: %d", s.CompletedTables)
+	logger.Info("Failed Tables:    %d", s.FailedTables)
 	logger.Info("Total Rows:       %s", FormatNumber(s.TotalRows))
 	logger.Info("Synced Rows:      %s", FormatNumber(s.SyncedRows))
 	logger.Info("Failed Rows:      %s", FormatNumber(s.FailedRows))
@@ -345,6 +366,18 @@ func (s *SyncStats) PrintSummary() {
 		avgSpeed := float64(s.SyncedRows) / s.GetElapsed().Seconds()
 		logger.Info("Avg Speed:        %s rows/s", FormatNumber(int64(avgSpeed)))
 	}
+
+	// 显示失败的表
+	failedTables := s.GetFailedTables()
+	if len(failedTables) > 0 {
+		logger.Info("\n----------------------------------------")
+		logger.Error("FAILED TABLES (%d):", len(failedTables))
+		logger.Info("----------------------------------------")
+		for tableName, errMsg := range failedTables {
+			logger.Error("  ✗ %s: %s", tableName, errMsg)
+		}
+	}
+
 	logger.Info("========================================")
 }
 

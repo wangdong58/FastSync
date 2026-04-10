@@ -75,6 +75,7 @@ type CompareConfig struct {
 	AutoCompare     bool    `yaml:"auto_compare"`
 	SampleRate      float64 `yaml:"sample_rate"`
 	CompareWorkers  int     `yaml:"compare_workers"`
+	CountOnly       bool    `yaml:"count_only"` // 仅对比数据量（行数）
 }
 
 // LoadConfig 加载配置文件

@@ -27,6 +27,7 @@ func main() {
 	var (
 		configFile     = flag.String("c", "config.yaml", "配置文件路径")
 		compareOnly    = flag.Bool("compare-only", false, "仅执行数据对比，跳过同步")
+		countOnly      = flag.Bool("count-only", false, "仅对比数据量（行数），不对比内容")
 		tables         = flag.String("tables", "", "指定要同步/对比的表，逗号分隔")
 		showVersion    = flag.Bool("v", false, "显示版本信息")
 		createSchema   = flag.Bool("create-schema", false, "仅创建表结构，不同步数据")
@@ -69,6 +70,11 @@ func main() {
 	// 如果命令行指定了 table-workers，覆盖配置文件
 	if *tableWorkers > 0 {
 		cfg.Sync.TableWorkers = *tableWorkers
+	}
+
+	// 如果命令行指定了 count-only，覆盖配置文件
+	if *countOnly {
+		cfg.Compare.CountOnly = true
 	}
 
 	logger.Info("SQL Server to OceanBase Sync Tool v%s", version)
@@ -186,6 +192,7 @@ func runCompare(cfg *config.Config, sourceDB, targetDB *database.Connection) {
 			Source:     t.Source,
 			Target:     t.Target,
 			SampleRate: cfg.Compare.SampleRate,
+			CountOnly:  cfg.Compare.CountOnly,
 		})
 	}
 
@@ -202,6 +209,7 @@ func runCompare(cfg *config.Config, sourceDB, targetDB *database.Connection) {
 				Source:     t,
 				Target:     strings.ToLower(strings.ReplaceAll(t, "dbo.", "")),
 				SampleRate: cfg.Compare.SampleRate,
+				CountOnly:  cfg.Compare.CountOnly,
 			})
 		}
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -89,10 +90,9 @@ func (e *Engine) runSequential(tables []config.TableConfig) error {
 		}
 
 		if err := e.syncTable(table, i+1, len(tables)); err != nil {
-			return fmt.Errorf("sync table %s failed: %w", table.Source, err)
+			logger.Error("  [%s] Table sync failed: %v", table.Source, err)
+			e.stats.RecordFailedTable(table.Source, err.Error())
 		}
-
-		atomic.AddInt64(&e.stats.CompletedTables, 1)
 	}
 
 	e.stats.Stop()
@@ -120,7 +120,6 @@ func (e *Engine) runConcurrent(tables []config.TableConfig, tableWorkers int) er
 	// 创建工作池
 	var wg sync.WaitGroup
 	tableChan := make(chan config.TableConfig, len(tables))
-	errors := make(chan error, len(tables))
 
 	// 使用原子计数器跟踪表索引
 	tableIndex := int32(0)
@@ -149,7 +148,8 @@ func (e *Engine) runConcurrent(tables []config.TableConfig, tableWorkers int) er
 				logger.Info("[%d/%d] Syncing table: %s -> %s", idx, totalTables, table.Source, table.Target)
 
 				if err := e.syncTable(table, int(idx), totalTables); err != nil {
-					errors <- fmt.Errorf("worker %d: sync table %s failed: %w", workerID, table.Source, err)
+					logger.Error("  [%s] Table sync failed: %v", table.Source, err)
+					e.stats.RecordFailedTable(table.Source, err.Error())
 				} else {
 					completed := atomic.LoadInt64(&e.stats.CompletedTables)
 					logger.Info("✓ Table %s completed (%d/%d)", table.Source, completed, totalTables)
@@ -168,19 +168,9 @@ func (e *Engine) runConcurrent(tables []config.TableConfig, tableWorkers int) er
 
 	// 等待所有worker完成
 	wg.Wait()
-	close(errors)
-
-	// 收集错误
-	var errList []error
-	for err := range errors {
-		errList = append(errList, err)
-	}
 
 	e.stats.Stop()
 
-	if len(errList) > 0 {
-		return fmt.Errorf("%d tables failed to sync: %v", len(errList), errList[0])
-	}
 	return nil
 }
 
@@ -278,10 +268,10 @@ func (e *Engine) syncTable(tableConfig config.TableConfig, tableIndex int, total
 
 // syncTableWithSplit 使用分段并发同步表
 func (e *Engine) syncTableWithSplit(tableConfig config.TableConfig, ts *schema.TableSchema, splitColumn string, totalRows int64, minID, maxID int64, tableStats *monitor.TableStats) error {
-	// 计算合理的channel缓冲区大小：最多积压2倍的writer数量
-	channelBuffer := e.config.Sync.Workers
-	if channelBuffer > 100 {
-		channelBuffer = 100
+	// 使用配置中的channel缓冲区大小
+	channelBuffer := e.config.Sync.ChannelBuffer
+	if channelBuffer <= 0 {
+		channelBuffer = 10000 // 默认值
 	}
 	logger.Info("  [%s] Using channel buffer size: %d (workers: %d)", tableConfig.Source, channelBuffer, e.config.Sync.Workers)
 
@@ -359,10 +349,13 @@ func (e *Engine) syncTableWithSplit(tableConfig config.TableConfig, ts *schema.T
 		}
 	}
 
+	// 检查writer错误（只记录日志，不返回错误）
 	var writerErr error
 	for err := range writerErrors {
 		if err != nil && writerErr == nil {
 			writerErr = err
+			logger.Error("  [%s] Writer error detected: %v", tableConfig.Source, err)
+			e.stats.RecordFailedTable(tableConfig.Source, fmt.Sprintf("writer error: %v", err))
 		}
 	}
 
@@ -378,8 +371,10 @@ func (e *Engine) syncTableWithSplit(tableConfig config.TableConfig, ts *schema.T
 		}
 	}
 
+	// writer错误已记录到统计，不返回错误让其他表继续
 	if writerErr != nil {
-		return fmt.Errorf("writer error: %w", writerErr)
+		logger.Error("  [%s] Table sync marked as failed due to writer error", tableConfig.Source)
+		return nil
 	}
 
 	return nil
@@ -449,7 +444,10 @@ func (e *Engine) syncTableSequential(tableConfig config.TableConfig, ts *schema.
 		// 批量插入
 		if len(batch) >= e.config.Sync.BatchSize {
 			if err := e.insertBatch(tableConfig.Target, columns, batch); err != nil {
-				return fmt.Errorf("insert batch failed: %w", err)
+				logger.Error("  [%s] Insert batch failed: %v", tableConfig.Source, err)
+				e.stats.RecordFailedTable(tableConfig.Source, fmt.Sprintf("insert batch failed: %v", err))
+				// 跳过剩余数据，标记表失败
+				return nil
 			}
 			rowCount += int64(len(batch))
 			e.stats.UpdateTableProgress(tableConfig.Source, int64(len(batch)))
@@ -462,7 +460,9 @@ func (e *Engine) syncTableSequential(tableConfig config.TableConfig, ts *schema.
 	// 插入剩余数据
 	if len(batch) > 0 {
 		if err := e.insertBatch(tableConfig.Target, columns, batch); err != nil {
-			return fmt.Errorf("insert final batch failed: %w", err)
+			logger.Error("  [%s] Insert final batch failed: %v", tableConfig.Source, err)
+			e.stats.RecordFailedTable(tableConfig.Source, fmt.Sprintf("insert final batch failed: %v", err))
+			return nil
 		}
 		rowCount += int64(len(batch))
 		e.stats.UpdateTableProgress(tableConfig.Source, int64(len(batch)))
@@ -708,7 +708,7 @@ func (e *Engine) tableWriter(tableConfig config.TableConfig, ts *schema.TableSch
 	defer func() {
 		if r := recover(); r != nil {
 			logger.Error("  [%s] Writer panic: %v", tableConfig.Source, r)
-			errors <- fmt.Errorf("writer panic: %v", r)
+			e.stats.RecordFailedTable(tableConfig.Source, fmt.Sprintf("writer panic: %v", r))
 		}
 		wg.Done()
 	}()
@@ -755,7 +755,13 @@ func (e *Engine) tableWriter(tableConfig config.TableConfig, ts *schema.TableSch
 		rows = nil
 
 		if err != nil {
-			errors <- fmt.Errorf("insert batch failed: %w", err)
+			// 记录失败信息到统计，结束当前表的写入
+			logger.Error("  [%s] Writer stopped due to error: %v", tableConfig.Source, err)
+			e.stats.RecordFailedTable(tableConfig.Source, fmt.Sprintf("insert failed: %v", err))
+			// 消费掉 channel 中剩余的数据，避免阻塞 reader
+			for remaining := range dataChan {
+				_ = remaining
+			}
 			return
 		}
 
@@ -796,6 +802,20 @@ func (e *Engine) insertBatch(table string, columns []string, rows [][]interface{
 		// 执行插入
 		_, err = e.targetDB.DB.Exec(query, args...)
 		if err != nil {
+			// 构建完整SQL
+			fullSQL := buildFullSQL(query, args)
+
+			// 记录日志（截断到1000字符）
+			logSQL := fullSQL
+			if len(logSQL) > 1000 {
+				logSQL = logSQL[:1000] + "..."
+			}
+			logger.Error("  [INSERT FAILED] Table: %s, Rows: %d, Error: %v", table, len(batch), err)
+			logger.Error("  [SQL] %s", logSQL)
+
+			// 将完整SQL写入文件
+			saveFailedSQL(table, fullSQL)
+
 			return err
 		}
 	}
@@ -839,6 +859,66 @@ func (e *Engine) buildBatchInsert(table string, columns []string, rows [][]inter
 	sb.WriteString(strings.Join(valueStrs, ", "))
 
 	return sb.String(), args, nil
+}
+
+// buildFullSQL 构建完整的可执行SQL语句
+func buildFullSQL(query string, args []interface{}) string {
+	// 将 ? 替换为实际值
+	fullSQL := query
+	for _, arg := range args {
+		// 处理不同类型的值
+		var valStr string
+		switch v := arg.(type) {
+		case string:
+			// 字符串值需要转义并加引号
+			valStr = "'" + escapeSQLString(v) + "'"
+		case []byte:
+			valStr = "'" + escapeSQLString(string(v)) + "'"
+		case nil:
+			valStr = "NULL"
+		case time.Time:
+			valStr = "'" + v.Format("2006-01-02 15:04:05.000") + "'"
+		default:
+			valStr = fmt.Sprintf("%v", v)
+		}
+		// 只替换第一个 ?
+		fullSQL = strings.Replace(fullSQL, "?", valStr, 1)
+	}
+	return fullSQL
+}
+
+// escapeSQLString 转义SQL字符串中的特殊字符
+func escapeSQLString(s string) string {
+	// 转义单引号
+	s = strings.ReplaceAll(s, "'", "''")
+	// 转义反斜杠
+	s = strings.ReplaceAll(s, "\\", "\\\\")
+	return s
+}
+
+// saveFailedSQL 将失败的SQL语句保存到文件
+func saveFailedSQL(tableName string, sql string) {
+	// 生成文件名: 表名_failed_hhmmss.sql
+	// 清理表名（去除schema前缀）
+	cleanTableName := tableName
+	if idx := strings.LastIndex(tableName, "."); idx != -1 {
+		cleanTableName = tableName[idx+1:]
+	}
+
+	timestamp := time.Now().Format("150405") // hhmmss
+	filename := fmt.Sprintf("%s_failed_%s.sql", cleanTableName, timestamp)
+
+	// 写入文件
+	content := fmt.Sprintf("-- Failed SQL for table: %s\n", tableName)
+	content += fmt.Sprintf("-- Generated at: %s\n", time.Now().Format("2006-01-02 15:04:05"))
+	content += fmt.Sprintf("-- SQL Length: %d bytes\n\n", len(sql))
+	content += sql
+
+	if err := os.WriteFile(filename, []byte(content), 0644); err != nil {
+		logger.Error("  [saveFailedSQL] Failed to write file %s: %v", filename, err)
+	} else {
+		logger.Error("  [saveFailedSQL] SQL saved to: %s", filename)
+	}
 }
 
 // estimateBatchMemory 估算batch的内存大小（字节）

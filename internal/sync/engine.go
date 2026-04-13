@@ -238,7 +238,11 @@ func (e *Engine) syncTable(tableConfig config.TableConfig, tableIndex int, total
 
 	// 创建表级进度更新器
 	var syncErr error
-	if splitColumn != "" && totalRows > int64(e.config.Sync.BatchSize) {
+	// 联合主键表强制使用顺序同步（避免单字段分段导致的数据重复问题）
+	if len(ts.PrimaryKeys) > 1 {
+		logger.Info("  [%s] Composite primary key detected (%v), using sequential mode", tableConfig.Source, ts.PrimaryKeys)
+		syncErr = e.syncTableSequential(tableConfig, ts, tableStats)
+	} else if splitColumn != "" && totalRows > int64(e.config.Sync.BatchSize) {
 		// 获取主键范围判断数据分布
 		minID, maxID, err := database.GetPrimaryKeyRange(e.sourceDB.DB, tableConfig.Source, splitColumn)
 		if err == nil && minID > 0 && maxID > 0 {
@@ -651,6 +655,7 @@ func (e *Engine) tableReaderSequential(tableConfig config.TableConfig, ts *schem
 	// 批量读取并直接插入（不经过channel，避免channel已关闭的问题）
 	batch := make([][]interface{}, 0, e.config.Sync.BatchSize)
 	converter := schema.NewValueConverter()
+	dupKeyCount := 0 // 记录重复键错误数量
 
 	for rows.Next() {
 		select {
@@ -683,7 +688,12 @@ func (e *Engine) tableReaderSequential(tableConfig config.TableConfig, ts *schem
 		// 批量插入
 		if len(batch) >= e.config.Sync.BatchSize {
 			if err := e.insertBatch(tableConfig.Target, columns, batch); err != nil {
-				return fmt.Errorf("compensation insert batch failed: %w", err)
+				if isDuplicateKeyError(err) {
+					dupKeyCount += len(batch)
+					logger.Warn("  [%s] Compensation batch skipped due to duplicate keys: %v", tableConfig.Source, err)
+				} else {
+					return fmt.Errorf("compensation insert batch failed: %w", err)
+				}
 			}
 			e.stats.UpdateTableProgress(tableConfig.Source, int64(len(batch)))
 			batch = nil
@@ -694,12 +704,21 @@ func (e *Engine) tableReaderSequential(tableConfig config.TableConfig, ts *schem
 	// 插入剩余数据
 	if len(batch) > 0 {
 		if err := e.insertBatch(tableConfig.Target, columns, batch); err != nil {
-			return fmt.Errorf("compensation insert final batch failed: %w", err)
+			if isDuplicateKeyError(err) {
+				dupKeyCount += len(batch)
+				logger.Warn("  [%s] Compensation final batch skipped due to duplicate keys: %v", tableConfig.Source, err)
+			} else {
+				return fmt.Errorf("compensation insert final batch failed: %w", err)
+			}
 		}
 		e.stats.UpdateTableProgress(tableConfig.Source, int64(len(batch)))
 	}
 
-	logger.Info("  [%s] Compensation completed for range %d-%d", tableConfig.Source, task.Start, task.End)
+	if dupKeyCount > 0 {
+		logger.Warn("  [%s] Compensation completed for range %d-%d with %d duplicate rows skipped", tableConfig.Source, task.Start, task.End, dupKeyCount)
+	} else {
+		logger.Info("  [%s] Compensation completed for range %d-%d", tableConfig.Source, task.Start, task.End)
+	}
 	return rows.Err()
 }
 
@@ -1043,4 +1062,17 @@ func (e *Engine) createSplitTasks(min, max int64, workerCount int) []SplitTask {
 	}
 
 	return tasks
+}
+
+// isDuplicateKeyError 检查是否为重复键错误
+// MySQL 错误代码 1062: Duplicate entry 'xxx' for key 'yyy'
+func isDuplicateKeyError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := strings.ToLower(err.Error())
+	// 检查 MySQL 错误代码 1062 或 Duplicate entry 关键字
+	return strings.Contains(errStr, "error 1062") ||
+		strings.Contains(errStr, "duplicate entry") ||
+		strings.Contains(errStr, "23000") // SQLSTATE for integrity constraint violation
 }

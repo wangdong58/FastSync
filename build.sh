@@ -28,8 +28,8 @@ GO_VERSION=$(go version | awk '{print $3}' | sed 's/go//')
 echo "Go version: $GO_VERSION"
 
 # Get project info
-VERSION=$(git describe --tags --always --dirty 2>/dev/null || echo "dev")
-BUILD_TIME=$(date -u '+%Y-%m-%d_%H:%M:%S')
+VERSION=$(date '+%Y.%-m.%-d')
+BUILD_TIME=$(date '+%Y-%m-%d_%H:%M:%S')
 
 echo "Version: $VERSION"
 echo "Build time: $BUILD_TIME"
